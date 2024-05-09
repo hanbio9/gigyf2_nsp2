@@ -1,27 +1,23 @@
 import pandas as pd
 from collections import defaultdict
 # Download
+dir = '/rna/han/gigyf2_nsp2/exp_data/del_rnaseq'
 summfile = '__resources/sample_list.csv'
-summtbl = pd.read_csv(summfile,index_col=0)
+summtbl = pd.read_csv(summfile, index_col=0)
 samples = []
 namematch = {}
 for barcode, row in summtbl.iterrows():
     name = row['name']
     namematch[name]=str(barcode)
     samples.append(name)
-print(samples)
 fraglen = 300
-
+thread = 32
 ################################################################################
 TARGETS = [ #expand('rawdata/{sample}.r1.fq.gz', sample=samples),
             #expand('rawdata/{sample}.fastqc.html',sample=samples),
             'results/summary_graph.png',
-            'results/transcipts_count_salmon.csv',
-            # 'results/bedtools_intersect_count.csv',
-            # 'results/featurecount.csv',
-            expand('results/featurecount_{genome}.csv', genome = ['cov2','host']),
-            expand('results/htseq_{genome}.csv', genome = ['cov2','host']),
-            expand('png/{quant}_scatter.png', quant = ['featurecount','htseq']),
+            'results/featurecount.csv',
+            'png/featurecount_scatter.png',
            ]
 
 ################################################################################
@@ -29,7 +25,6 @@ TARGETS = [ #expand('rawdata/{sample}.r1.fq.gz', sample=samples),
 rule all:
     input: TARGETS
 
-ruleorder: get_summary > uniq > align_host > align > uniq_cov > align_cov
 ################################################################################
 rule rename:
     input: r1 = lambda wildcards: "rawdata/"+namematch[wildcards.sample]+"_1.fq.gz", \
@@ -49,27 +44,27 @@ rule qc_stats:
     shell: 'fastqc -t {threads} -o rawdata {input}'
 
 rule STAR_index:
-    input: fa = '{ref_dir}/GRCh38.primary_assembly.par_masked.cov2.fa',
-           gff = '/casa/SeonghanLee/reference/cov2/gencode.v42.primary_assembly.cov2.gff3'
-    output: '{ref_dir}/star_cov2/GRCh38_primary_par_masked_cov2_{sjdb}/Genome'
-    threads: 32
+    input: fa = '{ref_dir}/genomic.fna',
+           gff = '{ref_dir}/genomic.gtf'
+    output: '{ref_dir}/star_{sjdb}/Genome'
+    threads: 128
     run:
         idx_dir = str(output).replace("/Genome","")
         shell('STAR --runThreadN {threads} --runMode genomeGenerate --genomeDir {idx_dir} \
                --genomeFastaFiles {input.fa} --sjdbGTFfile {input.gff} --sjdbOverhang {wildcards.sjdb}')
 
-rule align_cov:
-    input: r1 = 'rawdata/{sample}.r1.fastq.gz', r2 = 'rawdata/{sample}.r2.fastq.gz',
-           idx = '/casa/SeonghanLee/reference/cov2/star_cov2/GRCh38_primary_par_masked_cov2_{sjdb}/Genome'.format(sjdb=fraglen-1)
-    output: temp('both/{sample}.bam'), temp('both/{sample}.bam.bai')
-    threads: 16
+rule align:
+    input: r1 = dir + '/rawdata/{sample}.r1.fastq.gz', r2 = dir + '/rawdata/{sample}.r2.fastq.gz',
+           idx = '/rna/han/gigyf2_nsp2/exp_data/fclip_seq/HD/grch38_sars_cov_2/star_{sjdb}/Genome'.format(sjdb=fraglen-1)
+    output: 'alignments/{sample}.total.bam'
+    threads: thread
     run:
-        out_pfx = 'both/'+wildcards.sample+'.'
-        tmpdir = 'both/' + str(wildcards.sample)+'.cov2.tmp'
-        index = str(input.idx).replace('/Genome',"")
+        out_pfx = 'alignments/' + wildcards.sample + '.'
+        tmpdir = 'alignments/' + wildcards.sample + '.tmp'
+        index = str(input.idx).replace('/Genome', "")
         shell('STAR --runThreadN {threads} --readFilesIn {input.r1} {input.r2} --readFilesCommand zcat \
                --alignEndsType Local --genomeDir {index} --genomeLoad LoadAndRemove \
-               --outStd BAM_SortedByCoordinate --outSAMtype BAM SortedByCoordinate --outSAMunmapped Within KeepPairs \
+               --outStd BAM_SortedByCoordinate --outSAMtype BAM SortedByCoordinate --outSAMunmapped None \
                --outFilterType BySJout --alignIntronMin 20 --alignIntronMax 1000000 --alignMatesGapMax 1000000 \
                --alignSJstitchMismatchNmax -1 -1 -1 -1 --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 \
                --outFilterMismatchNoverReadLmax 0.04 --outFilterMismatchNmax 999 --outFilterMultimapNmax 20 \
@@ -78,201 +73,58 @@ rule align_cov:
                --outSJfilterCountTotalMin 1 1 1 1 --outSJfilterDistToOtherSJmin 0 0 0 0 \
                --chimOutType WithinBAM HardClip --chimScoreJunctionNonGTAG 0 --chimSegmentMin 20 \
                --limitBAMsortRAM 100000000000 --outTmpDir {tmpdir} --outFileNamePrefix {out_pfx} > {output[0]}')
-        shell('samtools index {output[0]}')
-
-rule uniq_cov:
-    input: 'both/{sample}.bam','both/{sample}.bam.bai'
-    output: 'cov2/{sample}.bam','cov2/{sample}.concordant.bam',
-            'cov2/{sample}.uniq.bam','cov2/{sample}.uniq.bam.bai'
-    threads: 8
-    run:
-        conbam='cov2/'+wildcards.sample+'.concordant.bam'
-        shell('samtools view -@ {threads} -F 256 -o {output[0]} {input[0]} NC_045512.2')
-        shell('samtools view -@ {threads} -f 2 {output[0]} -o {output[1]}')
-        shell('samtools view -@ {threads} -q 4 {output[1]} -o {output[2]}')
-        shell('samtools index {output[2]}')
-
-rule host_read:
-    input: 'both/{sample}.bam'
-    output: r1='both/{sample}.r1.host.fa.gz',r2='both/{sample}.r2.host.fa.gz'
-    threads: 8
-    shell: 'cat <(samtools view -h -f 4 -@ {threads} {input}) \
-            <(samtools view -F 256 -@ {threads} {input} | awk \'$3 != "NC_045512.2"\') | \
-            samtools sort -l 0 -n - | \
-            samtools fasta -@ {threads} -s /dev/null -0 /dev/null -1 {output.r1} -2 {output.r2} -'
-
-rule salmon:
-    input: r1='both/{sample}.r1.host.fa.gz',r2='both/{sample}.r2.host.fa.gz'
-    output: 'salmon/{sample}/quant.sf'
-    threads: 16
-    run:
-        sample=wildcards.sample
-        salmon='/casa/SeonghanLee/packages/salmon-1.9.0_linux_x86_64/bin/salmon'
-        salmon_idx='~/reference/gencode42/salmon/k19'
-        shell('echo {sample}')
-        shell('{salmon} quant -i {salmon_idx} --libType A -1 {input.r1} -2 {input.r2} \
-               -o salmon/{sample} --threads {threads} --validateMappings --seqBias --gcBias')
-
-rule salmon_count:
-    input: ['salmon/'+x+'/quant.sf' for x in samples]
-    output: 'results/transcipts_count_salmon.csv'
-    shell: 'python __resources/salmon_transcripts_count.py two'
-    # shell: 'touch {output}'
-
-rule align:
-    input: r1 = 'both/{sample}.r1.host.fa.gz', r2 = 'both/{sample}.r2.host.fa.gz',
-           idx = '/casa/SeonghanLee/reference/cov2/star_cov2/GRCh38_primary_par_masked_cov2_{sjdb}/Genome'.format(sjdb=fraglen-1)
-    output: temp('alignments/{sample}.total.bam')
-    threads: 16
-    run:
-        out_pfx = 'alignments/'+wildcards.sample+'.'
-        index = str(input.idx).replace('/Genome','')
-        tmpdir = 'alignments/' + str(wildcards.sample)+'.tmp'
-        shell('STAR --runThreadN {threads} --readFilesIn {input.r1} {input.r2} --readFilesCommand zcat \
-               --alignEndsType Local --genomeDir {index} --genomeLoad LoadAndRemove \
-               --outStd BAM_SortedByCoordinate --outSAMtype BAM SortedByCoordinate --outSAMunmapped None \
-               --outFilterType BySJout --alignIntronMin 20 --alignIntronMax 1000000 --alignMatesGapMax 1000000 \
-               --alignSJoverhangMin 8 --alignSJDBoverhangMin 1 \
-               --outFilterMismatchNoverReadLmax 0.04 --outFilterMismatchNmax 999 --outFilterMultimapNmax 20 \
-               --limitBAMsortRAM 100000000000 --outTmpDir {tmpdir} --outFileNamePrefix {out_pfx} > {output}')
-
-rule align_host:
-    input: 'alignments/{sample}.total.bam'
-    output: 'alignments/{sample}.host.bam'
-    threads: 8
-    shell: 'samtools view -@ {threads} -F 256 -h {input} | \
-            awk \'(substr($0,0,1)=="@") || ((substr($0,0,1)!="@") && ($3!="NC_045512.2"))\' | \
-            samtools view -@ {threads} -bS > {output}'
 
 rule uniq:
-    input: 'alignments/{sample}.host.bam'
-    output: 'alignments/{sample}.concordant.bam','alignments/{sample}.uniq.bam','alignments/{sample}.uniq.bam.bai'
+    input: 'alignments/{sample}.total.bam'
+    output: bam='alignments/{sample}.uniq.bam', bai='alignments/{sample}.uniq.bam.bai'
     threads: 8
     run:
-        shell('samtools view -b -@ {threads} -f 2 {input} -o {output[0]}')
-        shell('samtools view -b -@ {threads} -q 4 {output[0]} -o {output[1]}')
-        shell('samtools index {output[1]}')
+        shell('samtools view -b -@ {threads} -q 4 {input} -o {output.bam}')
+        shell('samtools index {output.bam}')
 
 ## Get preprocessing and alignment summary
 rule get_summary:
-    input: 'rawdata/{sample}.r1.fastq.gz',
-           'cov2/{sample}.bam','cov2/{sample}.concordant.bam','cov2/{sample}.uniq.bam',
-           'alignments/{sample}.host.bam','alignments/{sample}.concordant.bam','alignments/{sample}.uniq.bam'
+    input: dir + '/rawdata/{sample}.r1.fastq.gz',
+           'alignments/{sample}.total.bam', 'alignments/{sample}.uniq.bam'
     output: 'alignments/{sample}.summary'
     threads: 8
     run:
-        for i in range(1):
+        shell('unpigz -p {threads} {input[0]} -c | awk "END {{print NR / 4}}" >> {output}')
+        for i in range(1, 3):
             inputfile = str(input[i])
-            shell('unpigz -p {threads} {inputfile} -c | wc -l >> {output}')
-        for i in range(1,7):
-            inputfile = str(input[i])
-            shell('samtools view -@ {threads} -c {inputfile} >> {output}')
+            shell('samtools view -@ {threads} -F 256 -c {inputfile} | awk \'{{print $1 / 2}}\' >> {output}')
 
 rule summary_graph:
-    input: ['alignments/'+x+'.summary' for x in samples]
+    input: ['alignments/' + x + '.summary' for x in samples]
     output: 'results/summary_graph.png'
     shell: 'mkdir results -p &&'
-           'touch {output}'
            'python __resources/rna_summary_graph_cov2.py {output}'
 
-rule bedtools_intersect:
-    input: covbam = 'cov2/{sample}.uniq.bam',
-           covanno = '/casa/SeonghanLee/reference/cov2/bed/cov2.non_redundant.bed',
-           hostbam = 'alignments/{sample}.uniq.bam',
-           hostanno = '/casa/SeonghanLee//reference/gencode42/gencode.v42.basic.non_redundant.bed'
-    output: 'bed/{sample}.bed.gz'
-    threads: 1
-    shell: 'cat <(bedtools intersect -a {input.covbam} -b {input.covanno} -bed -wa -wb -s -f 0.50) <(bedtools intersect -a {input.hostbam} -b {input.hostanno} -bed -wa -wb -s -f 0.50) | uniq | pigz -p {threads} -c - > {output}'
-
-rule bedtools_intersect_count:
-    input: 'bed/'+x+'.bed.gz' for x in samples
-    output:'results/bedtools_intersect_count.csv'
-    # shell: 'python __resources/bedtools_intersect_count.py'
-    shell: 'touch {output}'
-
 rule sort_bam:
-    input: covbam = 'cov2/{sample}.uniq.bam',
-           hostbam = 'alignments/{sample}.uniq.bam'
-    output: covbam = temp('featurecount/{sample}.cov2.uniq.bam'),
-            hostbam = temp('featurecount/{sample}.host.uniq.bam')
-    threads: 4
-    shell: 'samtools sort -@ {threads} -n -o {output.covbam} {input.covbam} &&'
-           'samtools sort -@ {threads} -n -o {output.hostbam} {input.hostbam}'
-
-rule featurecount_cov:
-    input: 'featurecount/' + x + '.cov2.uniq.bam' for x in samples
-    output: 'featurecount/{sample}.cov2.txt'
-    params: bam = 'featurecount/{sample}.cov2.uniq.bam',
-            gff = '/casa/SeonghanLee/reference/cov2/ncbiGenes.feature.gtf'
-    threads: 4
-    shell: 'featureCounts -a {params.gff} -p -s 2 -T {threads} --countReadPairs -o {output} {params.bam}'
+    input: 'alignments/{sample}.uniq.bam'
+    output: temp('featurecount/{sample}.uniq.bam')
+    threads: 8
+    shell: 'samtools sort -@ {threads} -n -o {output} {input}'
 
 rule featurecount:
-    input: 'featurecount/' + x + '.host.uniq.bam' for x in samples
-    output: 'featurecount/{sample}.host.txt'
-    params: bam = 'featurecount/{sample}.host.uniq.bam',
-            gff = '/casa/SeonghanLee/reference/gencode42/gencode.v42.basic.annotation.sorted.gff3'
-    threads: 4
-    shell: 'featureCounts -a {params.gff} -p -s 2 -T {threads} --countReadPairs -o {output} {params.bam}'
-
-rule featurecount_count_cov:
-    input: 'featurecount/' + x + '.cov2.txt' for x in samples
-    output: 'results/featurecount_cov2.csv'
-    params: 'cov2'
-    shell: 'python __resources/featurecount.py {params}'
-    # shell: 'touch {output}'
+    input: 'featurecount/' + x + '.uniq.bam' for x in samples
+    output: 'featurecount/{sample}.txt'
+    params: bam = 'featurecount/{sample}.uniq.bam',
+            annot = '/rna/han/gigyf2_nsp2/exp_data/fclip_seq/HD/grch38_sars_cov_2/genomic.gtf'
+    threads: 16
+    shell: 'featureCounts -a {params.annot} -p -s 2 -T {threads} --countReadPairs -o {output} {params.bam}'
 
 rule featurecount_count:
-    input: 'featurecount/' + x + '.host.txt' for x in samples
-    output: 'results/featurecount_host.csv'
+    input: 'featurecount/' + x + '.txt' for x in samples
+    output: 'results/featurecount.csv'
     params: 'host'
-    shell: 'python __resources/featurecount.py {params}'
-    # shell: 'touch {output}'
-
-rule htseq_cov:
-    input: 'featurecount/' + x + '.cov2.uniq.bam' for x in samples
-    output:'htseq/{sample}.cov2.txt', 'htseq/{sample}.cov2.summary'
-    params: bam = 'featurecount/{sample}.cov2.uniq.bam', out = 'htseq/{sample}.cov2.raw.txt',
-            gff = '/casa/SeonghanLee/reference/cov2/ncbiGenes.feature.gtf'
-    threads: 1
-    shell: 'htseq-count -f bam --order name --stranded reverse --mode intersection-nonempty \
-            {params.bam} {params.gff} > {params.out} &&'
-            'head -n -5 {params.out} > {output[0]} &&'
-            'head -n -5 {params.out} | awk \'{{sum+=$2}}END{{print \"annotated\t\" sum}}\' > {output[1]} &&'
-            'tail -n 5 {params.out} >> {output[1]} &&'
-            'rm {params.out}'
-
-rule htseq:
-    input: 'featurecount/' + x + '.host.uniq.bam' for x in samples
-    output:'htseq/{sample}.host.txt', 'htseq/{sample}.host.summary'
-    params: bam = 'featurecount/{sample}.host.uniq.bam', out = 'htseq/{sample}.host.raw.txt',
-            gff = '/casa/SeonghanLee/reference/gencode42/gencode.v42.basic.annotation.sorted.gff3'
-    threads: 1
-    shell: 'htseq-count -f bam --order name --stranded reverse --mode intersection-nonempty \
-            {params.bam} {params.gff} > {params.out} &&'
-            'head -n -5 {params.out} > {output[0]} &&'
-            'head -n -5 {params.out} | awk \'{{sum+=$2}}END{{print \"annotated\t\" sum}}\' > {output[1]} &&'
-            'tail -n 5 {params.out} >> {output[1]} &&'
-            'rm {params.out}'
-
-rule htseq_count_cov:
-    input: 'htseq/'+x+'.cov2.txt' for x in samples
-    output:'results/htseq_cov2.csv'
-    params: 'cov2'
-    shell: 'python /casa/SeonghanLee/__resources/tools/htseq_count.py {params}'
-    # shell: 'touch {output}'
-
-rule htseq_count:
-    input: 'htseq/'+x+'.host.txt' for x in samples
-    output:'results/htseq_host.csv'
-    params: 'host'
-    shell: 'python /casa/SeonghanLee/__resources/tools/htseq_count.py {params}'
-    # shell: 'touch {output}'
+    shell: 'mkdir results -p &&'
+           'python __resources/featurecount.py {params}'
 
 rule scatter:
-    input: 'results/{quant}_host.csv'
+    input: 'results/{quant}.csv'
     output: 'png/{quant}_scatter.png'
     shell: 'mkdir -p png && mkdir -p pdf &&'
-           'python /casa/SeonghanLee/__resources/tools/rpm_scatter.py {input} {output}'
+           'python __resources/rpm_scatter.py {input} {output}'
 
 # vim: et syntax=snakemake
