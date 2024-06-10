@@ -1,7 +1,4 @@
-# gigyf2
-Article title:
-
-SARS-CoV-2 Nsp2 recruits GIGYF2 near viral replication sites and supports viral protein production
+# SARS-CoV-2 Nsp2 recruits GIGYF2 near viral replication sites and supports viral protein production
 
 Jimi Kim, Youngran Park, Doil Yoon, C. Han Li, Haedong Kim, and V. Narry Kim
 
